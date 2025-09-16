@@ -15,10 +15,11 @@ from rich.table import Table
 from rich.progress import track
 from rich.panel import Panel
 
-from .pdf_parser import PDFParser, ExtractionMode, ChunkStrategy
-from .pdf_manipulator import PDFManipulator
-from .converters import PDFConverter
-from .safety_manager import SafetyManager
+from pdf_parser import PDFParser, ExtractionMode, ChunkStrategy
+from pdf_manipulator import PDFManipulator
+from converters import PDFConverter
+from pdf_generator import PDFGenerator, GenerationConfig
+from safety_manager import SafetyManager
 
 console = Console()
 
@@ -35,6 +36,7 @@ class PDFEngine:
         self.parser = PDFParser(self.config.get('parser', {}))
         self.manipulator = PDFManipulator(self.config.get('manipulator', {}))
         self.converter = PDFConverter(self.config.get('converter', {}))
+        self.generator = PDFGenerator(self.config.get('generator', {}))
         self.safety = SafetyManager(self.config.get('safety', {}))
     
     def extract_text(self, file_path: str, pages: Optional[List[int]] = None,
@@ -93,6 +95,36 @@ class PDFEngine:
         """Merge multiple PDFs into one."""
         return self.manipulator.merge_pdfs(input_files, output_path)
     
+    def generate_pdf(self, input_path: str, output_path: str, 
+                    template: str = "eisvogel", engine: str = "auto",
+                    **kwargs) -> Dict[str, Any]:
+        """Generate PDF from markdown or text input."""
+        config = GenerationConfig(
+            template=template,
+            engine=engine,
+            **kwargs
+        )
+        
+        result = self.generator.generate_pdf(input_path, output_path, config)
+        
+        return {
+            "success": result.success,
+            "output_path": result.output_path,
+            "engine_used": result.engine_used,
+            "template_used": result.template_used,
+            "generation_time": result.generation_time,
+            "warnings": result.warnings,
+            "errors": result.errors
+        }
+    
+    def list_templates(self) -> Dict[str, Any]:
+        """List available PDF generation templates."""
+        return self.generator.list_templates()
+    
+    def get_engine_info(self) -> Dict[str, Any]:
+        """Get PDF engine information."""
+        return self.generator.get_engine_info()
+
     def get_info(self, file_path: str, verbose: bool = False) -> Dict[str, Any]:
         """Get PDF information and metadata."""
         result = self.parser.extract_text(file_path)
@@ -465,6 +497,134 @@ def search(ctx, file_path, search_term, case_sensitive, whole_words, page_number
             console.print(f"  {highlighted}")
     else:
         console.print(f"[yellow]No matches found for '{search_term}'[/yellow]")
+
+
+@cli.command()
+@click.argument('input_path')
+@click.argument('output_path')
+@click.option('--template', default='eisvogel', 
+              type=click.Choice(['eisvogel', 'typst-modern', 'academic', 'corporate', 'technical']),
+              help='Template to use for PDF generation')
+@click.option('--engine', default='auto',
+              type=click.Choice(['auto', 'xelatex', 'pdflatex', 'lualatex', 'typst']),
+              help='PDF engine to use')
+@click.option('--font-main', default='Inter', help='Main font family')
+@click.option('--font-code', default='JetBrains Mono', help='Code font family')
+@click.option('--font-size', default=11, help='Base font size')
+@click.option('--margins', default='normal',
+              type=click.Choice(['narrow', 'normal', 'wide']),
+              help='Page margins')
+@click.option('--toc', is_flag=True, help='Include table of contents')
+@click.option('--number-sections', is_flag=True, help='Number sections')
+@click.option('--syntax-highlighting', is_flag=True, default=True, help='Enable syntax highlighting')
+@click.option('--bibliography', help='Bibliography file path')
+@click.option('--color-theme', default='professional',
+              type=click.Choice(['professional', 'corporate', 'academic']),
+              help='Color theme')
+@click.pass_context
+def generate(ctx, input_path, output_path, template, engine, font_main, font_code,
+            font_size, margins, toc, number_sections, syntax_highlighting, 
+            bibliography, color_theme):
+    """Generate professional PDF from Markdown or text."""
+    engine_obj = ctx.obj['engine']
+    verbose = ctx.obj['verbose']
+    
+    with console.status(f"[bold green]Generating PDF with {template} template..."):
+        result = engine_obj.generate_pdf(
+            input_path=input_path,
+            output_path=output_path,
+            template=template,
+            engine=engine,
+            font_main=font_main,
+            font_code=font_code,
+            font_size=font_size,
+            margins=margins,
+            include_toc=toc,
+            number_sections=number_sections,
+            syntax_highlighting=syntax_highlighting,
+            bibliography=bibliography,
+            color_theme=color_theme
+        )
+    
+    if result["success"]:
+        console.print(f"[green]✅ PDF generated successfully: {result['output_path']}[/green]")
+        
+        # Show generation details
+        if verbose:
+            details_table = Table(title="Generation Details")
+            details_table.add_column("Property", style="cyan")
+            details_table.add_column("Value", style="green")
+            
+            details_table.add_row("Template Used", result['template_used'])
+            details_table.add_row("Engine Used", result['engine_used'])
+            details_table.add_row("Generation Time", f"{result['generation_time']:.2f}s")
+            
+            console.print(details_table)
+        
+        # Show warnings if any
+        if result["warnings"]:
+            console.print("\n[yellow]⚠️ Warnings:[/yellow]")
+            for warning in result["warnings"]:
+                console.print(f"  • {warning}")
+    else:
+        console.print("[red]❌ PDF generation failed[/red]")
+        if result["errors"]:
+            for error in result["errors"]:
+                console.print(f"[red]Error: {error}[/red]")
+        sys.exit(1)
+
+
+@cli.command()
+@click.option('--show-engines', is_flag=True, help='Show available PDF engines')
+@click.pass_context
+def templates(ctx, show_engines):
+    """List available templates and engines."""
+    engine = ctx.obj['engine']
+    
+    # Show templates
+    templates_data = engine.list_templates()
+    
+    templates_table = Table(title="📄 Available PDF Templates")
+    templates_table.add_column("Template", style="cyan", no_wrap=True)
+    templates_table.add_column("Name", style="white")
+    templates_table.add_column("Status", style="green")
+    templates_table.add_column("Engines", style="yellow")
+    templates_table.add_column("Description", style="blue", max_width=40)
+    
+    for template_id, info in templates_data.items():
+        status = "✅ Installed" if info["installed"] else "❌ Not Installed"
+        engines = ", ".join(info["engines"])
+        
+        templates_table.add_row(
+            template_id,
+            info["name"],
+            status,
+            engines,
+            info["description"]
+        )
+    
+    console.print(templates_table)
+    
+    # Show engines if requested
+    if show_engines:
+        console.print()
+        engines_data = engine.get_engine_info()
+        
+        engines_table = Table(title="⚙️ Available PDF Engines")
+        engines_table.add_column("Engine", style="cyan", no_wrap=True)
+        engines_table.add_column("Status", style="green")
+        engines_table.add_column("Description", style="blue", max_width=50)
+        
+        for engine_name, info in engines_data.items():
+            status = "✅ Available" if info["available"] else "❌ Not Available"
+            
+            engines_table.add_row(
+                engine_name,
+                status,
+                info["description"]
+            )
+        
+        console.print(engines_table)
 
 
 def main():

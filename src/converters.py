@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List
 import re
 from datetime import datetime
 
-from .pdf_parser import PDFParser, ExtractionResult
+from pdf_parser import PDFParser, ExtractionResult
 
 logger = logging.getLogger(__name__)
 

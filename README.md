@@ -2,9 +2,11 @@
 
 **Professional-grade PDF manipulation toolkit for CLI agents and automated workflows**
 
-Part of the **FSS Parsers** collection - individual parser tools with the `fss-parse-*` CLI prefix for comprehensive document operations.
+Part of the **FSS Parsers** collection - individual parser tools with the `fss-parse-*` CLI prefix for comprehensive document operations. **Completely standalone** - no dependencies on other FSS parsers.
 
 🛡️ **Built with production safety and enterprise quality standards**
+
+🚀 **NEW: Professional PDF Generation from Markdown with modern templates!**
 
 ## 🚀 Quick Start
 
@@ -105,6 +107,51 @@ pdf/
 - Hash validation prevents data corruption
 - Automatic backups with collision detection
 - Graceful error handling and recovery
+
+## 🚀 NEW: Professional PDF Generation
+
+### Generate Beautiful PDFs from Markdown
+```bash
+# Basic generation with Eisvogel template
+fss-parse-pdf generate document.md output.pdf
+
+# Corporate styling with custom fonts
+fss-parse-pdf generate report.md corporate_report.pdf \
+  --template eisvogel \
+  --font-main "Calibri" \
+  --font-code "Consolas" \
+  --color-theme corporate \
+  --toc \
+  --number-sections
+
+# Modern Typst engine for fast compilation
+fss-parse-pdf generate document.md output.pdf \
+  --template typst-modern \
+  --engine typst \
+  --margins narrow
+
+# Academic paper with bibliography
+fss-parse-pdf generate paper.md paper.pdf \
+  --template academic \
+  --bibliography references.bib \
+  --syntax-highlighting
+```
+
+### Template Management
+```bash
+# List available templates and engines
+fss-parse-pdf templates --show-engines
+
+# Check what's installed
+fss-parse-pdf templates
+```
+
+**Available Templates:**
+- **eisvogel** - Professional LaTeX template with modern typography
+- **typst-modern** - Fast, clean template using Typst engine  
+- **academic** - Traditional academic paper format
+- **corporate** - Business-focused professional styling
+- **technical** - Code-heavy documentation template
 
 ## 🛠 CLI Interface
 
