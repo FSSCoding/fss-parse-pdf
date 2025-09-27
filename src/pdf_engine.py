@@ -8,6 +8,7 @@ import argparse
 import sys
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union
 import click
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 from pdf_parser import PDFParser, ExtractionMode, ChunkStrategy
 from pdf_manipulator import PDFManipulator
+from pdf_modifier import PDFModifier, SignatureOptions, FormFillData, TextInsertion, format_modification_results_to_markdown
 from converters import PDFConverter
 from pdf_generator import PDFGenerator, GenerationConfig
 from safety_manager import SafetyManager
@@ -1016,6 +1018,460 @@ def batch(ctx, input_dir, output, pattern, operation, format, sections, preserve
             for result in results:
                 if result['status'] == 'failed':
                     console.print(f"  • {result['file']}: {result['error']}")
+
+
+@cli.command()
+@click.argument('input_pdf', type=click.Path(exists=True, file_okay=True, dir_okay=False))
+@click.argument('output_pdf', type=click.Path())
+@click.option('--add-signature', type=click.Path(exists=True), help='Add signature image to PDF')
+@click.option('--signature-position', default='400,700,500,750', help='Signature position as x1,y1,x2,y2')
+@click.option('--fill-form', multiple=True, help='Fill form field as field_name:value')
+@click.option('--add-text', help='Add text to PDF')
+@click.option('--text-position', default='100,100', help='Text position as x,y')
+@click.option('--text-page', default=0, help='Page number for text (0-based)')
+@click.option('--font-size', default=12, help='Font size for text')
+@click.pass_context
+def modify(ctx, input_pdf, output_pdf, add_signature, signature_position, fill_form, add_text, text_position, text_page, font_size):
+    """Modify PDF by adding signatures, filling forms, or inserting text."""
+    engine = ctx.obj['engine']
+    
+    try:
+        # Initialize PDF modifier
+        modifier = PDFModifier()
+        
+        # Parse options
+        signatures = []
+        form_data = []
+        text_insertions = []
+        
+        # Handle signature addition
+        if add_signature:
+            pos_parts = [float(x.strip()) for x in signature_position.split(',')]
+            if len(pos_parts) != 4:
+                raise ValueError("Signature position must be x1,y1,x2,y2")
+            
+            signatures.append(SignatureOptions(
+                position=tuple(pos_parts),
+                image_path=add_signature
+            ))
+        
+        # Handle form filling
+        for form_item in fill_form:
+            if ':' in form_item:
+                field_name, field_value = form_item.split(':', 1)
+                form_data.append(FormFillData(
+                    field_name=field_name.strip(),
+                    field_value=field_value.strip()
+                ))
+        
+        # Handle text insertion
+        if add_text:
+            pos_parts = [float(x.strip()) for x in text_position.split(',')]
+            if len(pos_parts) != 2:
+                raise ValueError("Text position must be x,y")
+            
+            text_insertions.append(TextInsertion(
+                text=add_text,
+                position=tuple(pos_parts),
+                page_number=text_page,
+                font_size=font_size
+            ))
+        
+        if not signatures and not form_data and not text_insertions:
+            console.print("[yellow]No modifications specified. Use --help to see available options.[/yellow]")
+            return
+        
+        # Perform modifications
+        console.print(f"[blue]Modifying PDF: {input_pdf}[/blue]")
+        result = modifier.modify_pdf(
+            input_pdf,
+            output_pdf,
+            signatures=signatures,
+            form_data=form_data,
+            text_insertions=text_insertions
+        )
+        
+        if result.success:
+            console.print(f"[green]✅ PDF modified successfully![/green]")
+            console.print(f"[green]📄 Output: {result.output_path}[/green]")
+            console.print(f"[blue]📊 {result.modifications_applied} total modifications applied[/blue]")
+            console.print(f"[blue]⏱️  Processing time: {result.processing_time:.2f}s[/blue]")
+            
+            if result.signatures_added > 0:
+                console.print(f"[green]✍️  {result.signatures_added} signature(s) added[/green]")
+            if result.forms_filled > 0:
+                console.print(f"[green]📝 {result.forms_filled} form field(s) filled[/green]")
+            if result.text_insertions > 0:
+                console.print(f"[green]📄 {result.text_insertions} text element(s) inserted[/green]")
+                
+        else:
+            console.print(f"[red]❌ PDF modification failed: {result.error_message}[/red]")
+            
+    except Exception as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        if not ctx.obj['quiet']:
+            logger.exception("Modify command failed")
+
+
+@cli.command()
+@click.argument('input_dir', type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.argument('output_dir', type=click.Path())
+@click.option('--pattern', default='*.pdf', help='File pattern to match')
+@click.option('--add-signature', type=click.Path(exists=True), help='Add signature image to all PDFs')
+@click.option('--signature-position', default='400,700,500,750', help='Signature position as x1,y1,x2,y2')
+@click.option('--fill-form', multiple=True, help='Fill form field as field_name:value')
+@click.option('--add-text', help='Add text to all PDFs')
+@click.option('--text-position', default='100,100', help='Text position as x,y')
+@click.option('--text-page', default=0, help='Page number for text (0-based)')
+@click.option('--font-size', default=12, help='Font size for text')
+@click.option('--all-pages', is_flag=True, help='Apply text/signature to all pages')
+@click.option('--config', type=click.Path(exists=True), help='JSON configuration file for complex modifications')
+@click.option('--template', help='Use predefined modification template')
+@click.option('--preview-only', is_flag=True, help='Preview modifications without applying')
+@click.option('--parallel', is_flag=True, help='Process files in parallel')
+@click.pass_context
+def batch_modify(ctx, input_dir, output_dir, pattern, add_signature, signature_position, fill_form, add_text, text_position, text_page, font_size, all_pages, config, template, preview_only, parallel):
+    """Batch modify multiple PDF files with same modifications."""
+    import glob
+    import json
+    from pathlib import Path
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    # Create output directory
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Find matching files
+    input_path = Path(input_dir)
+    files = list(input_path.glob(pattern))
+    
+    if not files:
+        console.print(f"[yellow]No files matching '{pattern}' found in {input_dir}[/yellow]")
+        return
+    
+    console.print(f"[blue]Found {len(files)} PDF files to modify[/blue]")
+    
+    # Load configuration if provided
+    modifications = {}
+    if config:
+        with open(config, 'r') as f:
+            modifications = json.load(f)
+        console.print(f"[blue]Loaded configuration from {config}[/blue]")
+    
+    # Load template if provided
+    if template:
+        template_config = load_modification_template(template)
+        if template_config:
+            modifications.update(template_config)
+            console.print(f"[blue]Applied template: {template}[/blue]")
+        else:
+            console.print(f"[yellow]Unknown template: {template}[/yellow]")
+    
+    # Build modification options from CLI args
+    if not modifications:
+        signatures = []
+        form_data = []
+        text_insertions = []
+        
+        if add_signature:
+            pos_parts = [float(x.strip()) for x in signature_position.split(',')]
+            signatures.append(SignatureOptions(
+                position=tuple(pos_parts),
+                image_path=add_signature
+            ))
+        
+        for form_item in fill_form:
+            if ':' in form_item:
+                field_name, field_value = form_item.split(':', 1)
+                form_data.append(FormFillData(
+                    field_name=field_name.strip(),
+                    field_value=field_value.strip()
+                ))
+        
+        if add_text:
+            pos_parts = [float(x.strip()) for x in text_position.split(',')]
+            text_insertions.append(TextInsertion(
+                text=add_text,
+                position=tuple(pos_parts),
+                page_number=text_page,
+                font_size=font_size
+            ))
+        
+        modifications = {
+            'signatures': signatures,
+            'form_data': form_data,
+            'text_insertions': text_insertions,
+            'all_pages': all_pages
+        }
+    
+    if preview_only:
+        console.print(f"[yellow]PREVIEW MODE - No files will be modified[/yellow]")
+        console.print(f"[blue]Modifications to apply:[/blue]")
+        preview_modifications(modifications)
+        return
+    
+    # Process files
+    results = []
+    
+    def process_single_file(pdf_file):
+        """Process a single PDF file"""
+        try:
+            output_file = output_path / pdf_file.name
+            
+            modifier = PDFModifier()
+            
+            # Apply modifications based on config or CLI args
+            if all_pages and 'text_insertions' in modifications:
+                # Apply text to all pages
+                result = apply_modifications_all_pages(
+                    modifier, str(pdf_file), str(output_file), modifications
+                )
+            else:
+                # Standard modification
+                result = modifier.modify_pdf(
+                    str(pdf_file),
+                    str(output_file),
+                    signatures=modifications.get('signatures', []),
+                    form_data=modifications.get('form_data', []),
+                    text_insertions=modifications.get('text_insertions', [])
+                )
+            
+            if result.success:
+                return {'file': pdf_file.name, 'status': 'success', 'modifications': result.modifications_applied, 'time': result.processing_time}
+            else:
+                return {'file': pdf_file.name, 'status': 'failed', 'error': result.error_message}
+                
+        except Exception as e:
+            return {'file': pdf_file.name, 'status': 'failed', 'error': str(e)}
+    
+    if parallel and len(files) > 1:
+        console.print(f"[blue]Processing {len(files)} files in parallel...[/blue]")
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_file = {executor.submit(process_single_file, f): f for f in files}
+            
+            with console.status("[bold blue]Processing files...", spinner="dots") as status:
+                for future in as_completed(future_to_file):
+                    result = future.result()
+                    results.append(result)
+                    
+                    if result['status'] == 'success':
+                        status.update(f"[green]✅ {result['file']} ({result['modifications']} mods)[/green]")
+                    else:
+                        status.update(f"[red]❌ {result['file']} failed[/red]")
+    else:
+        console.print(f"[blue]Processing {len(files)} files sequentially...[/blue]")
+        for pdf_file in files:
+            result = process_single_file(pdf_file)
+            results.append(result)
+            
+            if result['status'] == 'success':
+                console.print(f"[green]✅ {result['file']} - {result['modifications']} modifications applied[/green]")
+            else:
+                console.print(f"[red]❌ {result['file']} - {result['error']}[/red]")
+    
+    # Print summary
+    successful = sum(1 for r in results if r['status'] == 'success')
+    failed = len(results) - successful
+    total_modifications = sum(r.get('modifications', 0) for r in results if r['status'] == 'success')
+    
+    console.print(f"\n[green]Batch modification complete![/green]")
+    console.print(f"✅ Successful: {successful}/{len(files)}")
+    console.print(f"📊 Total modifications applied: {total_modifications}")
+    if failed > 0:
+        console.print(f"❌ Failed: {failed}")
+
+
+def load_modification_template(template_name: str) -> dict:
+    """Load predefined modification template"""
+    templates = {
+        'approval-stamp': {
+            'text_insertions': [
+                TextInsertion(
+                    text='APPROVED',
+                    position=(450, 50),
+                    font_size=16
+                ),
+                TextInsertion(
+                    text=f'Date: {time.strftime("%Y-%m-%d")}',
+                    position=(450, 30),
+                    font_size=10
+                )
+            ]
+        },
+        'confidential-watermark': {
+            'text_insertions': [
+                TextInsertion(
+                    text='CONFIDENTIAL',
+                    position=(200, 400),
+                    font_size=48
+                )
+            ],
+            'all_pages': True
+        },
+        'signature-bottom-right': {
+            'signatures': [
+                SignatureOptions(
+                    position=(400, 50, 500, 100),
+                    text='Authorized Signature'
+                )
+            ]
+        },
+        'review-stamp': {
+            'text_insertions': [
+                TextInsertion(
+                    text='REVIEWED',
+                    position=(50, 50),
+                    font_size=12
+                ),
+                TextInsertion(
+                    text=f'Agent 2 - {time.strftime("%Y-%m-%d %H:%M")}',
+                    position=(50, 30),
+                    font_size=8
+                )
+            ]
+        }
+    }
+    
+    return templates.get(template_name)
+
+
+def preview_modifications(modifications: dict):
+    """Preview modifications without applying"""
+    if modifications.get('signatures'):
+        console.print(f"  📝 {len(modifications['signatures'])} signature(s)")
+        for sig in modifications['signatures']:
+            if hasattr(sig, 'image_path') and sig.image_path:
+                console.print(f"    • Image signature: {sig.image_path}")
+            elif hasattr(sig, 'text') and sig.text:
+                console.print(f"    • Text signature: {sig.text}")
+    
+    if modifications.get('form_data'):
+        console.print(f"  📋 {len(modifications['form_data'])} form field(s)")
+        for form in modifications['form_data']:
+            console.print(f"    • {form.field_name}: {form.field_value}")
+    
+    if modifications.get('text_insertions'):
+        console.print(f"  📄 {len(modifications['text_insertions'])} text insertion(s)")
+        for text in modifications['text_insertions']:
+            console.print(f"    • '{text.text}' at {text.position}")
+    
+    if modifications.get('all_pages'):
+        console.print(f"  🔄 Apply to all pages: Yes")
+
+
+def apply_modifications_all_pages(modifier, input_path, output_path, modifications):
+    """Apply modifications to all pages of a PDF"""
+    import fitz
+    
+    # Get page count first
+    doc = fitz.open(input_path)
+    page_count = len(doc)
+    doc.close()
+    
+    # Create text insertions for all pages
+    all_text_insertions = []
+    base_text_insertions = modifications.get('text_insertions', [])
+    
+    for page_num in range(page_count):
+        for text_item in base_text_insertions:
+            new_text_item = TextInsertion(
+                text=text_item.text,
+                position=text_item.position,
+                page_number=page_num,
+                font_size=text_item.font_size
+            )
+            all_text_insertions.append(new_text_item)
+    
+    # Apply all modifications
+    return modifier.modify_pdf(
+        input_path,
+        output_path,
+        signatures=modifications.get('signatures', []),
+        form_data=modifications.get('form_data', []),
+        text_insertions=all_text_insertions
+    )
+
+
+@cli.command()
+@click.argument('pdf_path', type=click.Path(exists=True, file_okay=True, dir_okay=False))
+@click.option('--page', default=0, help='Page number to analyze (0-based)')
+@click.pass_context
+def coordinates(ctx, pdf_path, page):
+    """Show PDF page dimensions and coordinate helper grid."""
+    import fitz
+    
+    try:
+        doc = fitz.open(pdf_path)
+        
+        if page >= len(doc):
+            console.print(f"[red]Error: Page {page} doesn't exist. PDF has {len(doc)} pages.[/red]")
+            return
+        
+        pdf_page = doc.load_page(page)
+        rect = pdf_page.rect
+        
+        console.print(f"[blue]📄 PDF: {Path(pdf_path).name}[/blue]")
+        console.print(f"[blue]📋 Page {page + 1} of {len(doc)}[/blue]")
+        console.print(f"[green]📐 Dimensions: {rect.width:.1f} x {rect.height:.1f} points[/green]")
+        
+        # Show coordinate system info
+        console.print(f"\n[yellow]📍 COORDINATE SYSTEM:[/yellow]")
+        console.print(f"  • Origin (0,0) is at BOTTOM-LEFT corner")
+        console.print(f"  • X increases rightward (0 → {rect.width:.0f})")
+        console.print(f"  • Y increases upward (0 → {rect.height:.0f})")
+        
+        # Show useful coordinate reference points
+        console.print(f"\n[cyan]🎯 REFERENCE POINTS:[/cyan]")
+        
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Position", style="cyan")
+        table.add_column("Coordinates", style="green")
+        table.add_column("Use Case", style="yellow")
+        
+        positions = [
+            ("Bottom-Left", f"(0, 0)", "Origin point"),
+            ("Bottom-Right", f"({rect.width:.0f}, 0)", "Bottom edge signatures"),
+            ("Top-Left", f"(0, {rect.height:.0f})", "Headers, titles"),
+            ("Top-Right", f"({rect.width:.0f}, {rect.height:.0f})", "Page numbers, dates"),
+            ("Center", f"({rect.width/2:.0f}, {rect.height/2:.0f})", "Watermarks, stamps"),
+            ("Bottom Center", f"({rect.width/2:.0f}, 50)", "Footer text"),
+            ("Top Center", f"({rect.width/2:.0f}, {rect.height-50:.0f})", "Header text"),
+            ("Signature Area", f"(400, 50)", "Standard signature position"),
+            ("Approval Stamp", f"(450, 100)", "Document approval area"),
+            ("Margin Left", f"(50, {rect.height/2:.0f})", "Left margin notes"),
+            ("Margin Right", f"({rect.width-100:.0f}, {rect.height/2:.0f})", "Right margin notes")
+        ]
+        
+        for pos, coords, use_case in positions:
+            table.add_row(pos, coords, use_case)
+        
+        console.print(table)
+        
+        # Show grid reference
+        console.print(f"\n[magenta]📏 QUICK REFERENCE GRID:[/magenta]")
+        console.print(f"  • Small text (8-10pt): Use for dates, footnotes")
+        console.print(f"  • Normal text (12pt): Use for signatures, stamps")
+        console.print(f"  • Large text (16-20pt): Use for titles, approvals")
+        console.print(f"  • Watermark text (48pt): Use for confidential marks")
+        
+        # Signature size reference
+        console.print(f"\n[blue]✍️  SIGNATURE AREA REFERENCE:[/blue]")
+        console.print(f"  • Standard signature: 100x50 points")
+        console.print(f"  • Large signature: 150x75 points")
+        console.print(f"  • Bottom-right: ({rect.width-150:.0f}, 50, {rect.width-50:.0f}, 100)")
+        console.print(f"  • Bottom-left: (50, 50, 150, 100)")
+        
+        # Common templates
+        console.print(f"\n[green]📋 COMMON TEMPLATES:[/green]")
+        console.print(f"  • approval-stamp: Text at (450, 50)")
+        console.print(f"  • review-stamp: Text at (50, 50)")
+        console.print(f"  • confidential-watermark: Large text at center")
+        console.print(f"  • signature-bottom-right: Signature at (400, 50)")
+        
+        doc.close()
+        
+    except Exception as e:
+        console.print(f"[red]❌ Error analyzing PDF: {e}[/red]")
 
 
 def main():
