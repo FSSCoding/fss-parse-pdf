@@ -27,7 +27,7 @@ setup(
     author_email="development@fsscoding.com",
     url="https://github.com/FSSCoding/fss-parse-pdf",
     
-    packages=find_packages(where="src"),
+    py_modules=["pdf_parser", "converters", "pdf_manipulator", "pdf_generator", "pdf_engine", "safety_manager"],
     package_dir={"": "src"},
     
     entry_points={

@@ -29,8 +29,8 @@ class GenerationConfig:
     """Configuration for PDF generation."""
     template: str = "eisvogel"
     engine: str = "auto"  # auto, xelatex, pdflatex, lualatex, typst
-    font_main: str = "Inter"
-    font_code: str = "JetBrains Mono"
+    font_main: str = "Liberation Sans"
+    font_code: str = "Liberation Mono"
     font_size: int = 11
     color_theme: str = "professional"
     margins: str = "normal"  # narrow, normal, wide

@@ -40,6 +40,47 @@ class SafetyManager:
         logger.debug(f"Safety Manager initialized with backup={self.create_backup}, "
                     f"confirmation={self.require_confirmation}, hash={self.hash_validation}")
     
+    def validate_file(self, file_path: str) -> Dict[str, Any]:
+        """
+        Validate file exists and is readable.
+        
+        Args:
+            file_path: Path to file to validate
+            
+        Returns:
+            dict: Safety validation result with is_safe status and issues
+        """
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                return {
+                    'is_safe': False,
+                    'issues': [f"File does not exist: {file_path}"]
+                }
+            
+            if not path.is_file():
+                return {
+                    'is_safe': False,
+                    'issues': [f"Path is not a file: {file_path}"]
+                }
+            
+            if path.stat().st_size == 0:
+                return {
+                    'is_safe': False,
+                    'issues': [f"File is empty: {file_path}"]
+                }
+            
+            return {
+                'is_safe': True,
+                'issues': []
+            }
+            
+        except (OSError, PermissionError) as e:
+            return {
+                'is_safe': False,
+                'issues': [f"Permission error accessing file: {e}"]
+            }
+    
     def calculate_file_hash(self, file_path: Path) -> str:
         """
         Calculate SHA256 hash of file.
